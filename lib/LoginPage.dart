@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'firebase_helper.dart'; // Add this import
+import 'package:shared_preferences/shared_preferences.dart';
+import 'firebase_helper.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({Key? key}) : super(key: key);
@@ -20,10 +21,48 @@ class _LoginPageState extends State<LoginPage> {
   final FirebaseAuth _auth = FirebaseAuth.instance;
 
   @override
+  void initState() {
+    super.initState();
+    _ensureCleanState();
+  }
+
+  @override
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
     super.dispose();
+  }
+
+  // Ensure clean authentication state
+  Future<void> _ensureCleanState() async {
+    try {
+      print('🔄 Ensuring clean authentication state...');
+
+      // Clear any existing auth state
+      final currentUser = _auth.currentUser;
+      if (currentUser != null) {
+        print('⚠️ Found existing user, signing out...');
+        try {
+          // Reload user data first if user exists
+          await currentUser.reload();
+        } catch (e) {
+          print('⚠️ Error reloading user (continuing): $e');
+        }
+        await _auth.signOut();
+      }
+
+      // Clear all local storage
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.clear();
+
+      // Wait a moment to ensure everything is cleared
+      await Future.delayed(const Duration(milliseconds: 300));
+
+      print('✅ Clean state ensured');
+    } catch (e) {
+      print('⚠️ Error ensuring clean state: $e');
+      // Continue anyway
+    }
   }
 
   Future<void> _emailPasswordAuth() async {
@@ -32,51 +71,125 @@ class _LoginPageState extends State<LoginPage> {
     setState(() => _isLoading = true);
 
     try {
-      UserCredential userCredential;
+      print('🔄 Starting authentication process...');
+
+      // Ensure we start with a clean state
+      await _ensureCleanState();
+
+      // Add a small delay to ensure state is fully cleared
+      await Future.delayed(const Duration(milliseconds: 500));
+
+      UserCredential? userCredential;
+      final email = _emailController.text.trim();
+      final password = _passwordController.text;
+
+      print('📧 Email: $email');
+      print('🔒 Mode: ${_isLoginMode ? "Login" : "Sign Up"}');
 
       if (_isLoginMode) {
-        userCredential = await _auth.signInWithEmailAndPassword(
-          email: _emailController.text.trim(),
-          password: _passwordController.text,
-        );
-      } else {
-        userCredential = await _auth.createUserWithEmailAndPassword(
-          email: _emailController.text.trim(),
-          password: _passwordController.text,
-        );
-      }
+        print('🔄 Attempting sign in...');
 
-      // ✅ NEW: Update online status after successful login/signup
-      if (userCredential.user != null) {
-        print('✅ User authenticated: ${userCredential.user!.uid}');
+        // Try to sign in with additional error handling
+        try {
+          userCredential = await _auth.signInWithEmailAndPassword(
+            email: email,
+            password: password,
+          );
+          print('✅ Sign in successful');
+        } on FirebaseAuthException catch (e) {
+          print('❌ Firebase Auth Exception during sign in: ${e.code} - ${e.message}');
+          throw e;
+        } catch (e) {
+          print('❌ General error during sign in: $e');
+          print('❌ Error type: ${e.runtimeType}');
+
+          // If there's a type cast error, try to recover
+          if (e.toString().contains('PigeonUserDetails') || e.toString().contains('type cast')) {
+            print('🔄 Detected type cast error, attempting recovery...');
+
+            // Force sign out and try again
+            await _auth.signOut();
+            await Future.delayed(const Duration(seconds: 1));
+
+            try {
+              userCredential = await _auth.signInWithEmailAndPassword(
+                email: email,
+                password: password,
+              );
+              print('✅ Recovery sign in successful');
+            } catch (recoveryError) {
+              print('❌ Recovery attempt failed: $recoveryError');
+              throw Exception('Authentication failed. Please try again or restart the app.');
+            }
+          } else {
+            throw e;
+          }
+        }
+      } else {
+        print('🔄 Attempting account creation...');
 
         try {
-          // Set user as online in Firestore
-          await FirebaseHelper.updateOnlineStatus(true);
-          print('✅ Online status updated to true');
-
-          // Initialize Firebase Helper to ensure user document exists
-          await FirebaseHelper.initializeApp();
-          print('✅ Firebase helper initialized');
-
-        } catch (helperError) {
-          print('⚠️ Firebase helper error (continuing): $helperError');
-          // Don't block login for Firebase helper errors
+          userCredential = await _auth.createUserWithEmailAndPassword(
+            email: email,
+            password: password,
+          );
+          print('✅ Account creation successful');
+        } on FirebaseAuthException catch (e) {
+          print('❌ Firebase Auth Exception during sign up: ${e.code} - ${e.message}');
+          throw e;
+        } catch (e) {
+          print('❌ General error during sign up: $e');
+          throw e;
         }
+      }
+
+      // Verify we have a valid user
+      if (userCredential?.user == null) {
+        throw Exception('Authentication failed - no user returned');
+      }
+
+      final user = userCredential!.user!;
+      print('✅ User authenticated: ${user.uid}');
+      print('📧 User email: ${user.email}');
+
+      try {
+        // Initialize Firebase Helper and set online status
+        print('🔄 Initializing Firebase Helper...');
+        await FirebaseHelper.initializeApp();
+
+        print('🔄 Setting online status...');
+        await FirebaseHelper.updateOnlineStatus(true);
+
+        print('✅ Firebase helper initialized successfully');
+      } catch (helperError) {
+        print('⚠️ Firebase helper error (continuing): $helperError');
+        // Don't block login for Firebase helper errors
       }
 
       // Show success message
       if (mounted) {
         _showSuccess();
-        // DON'T navigate manually - let AuthWrapper handle it!
-        // The AuthWrapper will automatically detect the auth state change
-        // and navigate to the appropriate screen
+        print('✅ Login process completed successfully');
       }
+
     } on FirebaseAuthException catch (e) {
+      print('❌ FirebaseAuthException: ${e.code} - ${e.message}');
       _showError(_getErrorMessage(e));
     } catch (e) {
-      print('Login error: $e');
-      _showError('An unexpected error occurred. Please try again.');
+      print('❌ Login error: $e');
+      print('❌ Error type: ${e.runtimeType}');
+
+      // Provide more specific error messages
+      String errorMessage;
+      if (e.toString().contains('PigeonUserDetails') || e.toString().contains('type cast')) {
+        errorMessage = 'Authentication error detected. Please restart the app and try again.';
+      } else if (e.toString().contains('network')) {
+        errorMessage = 'Network error. Please check your internet connection.';
+      } else {
+        errorMessage = 'Login failed: ${e.toString()}';
+      }
+
+      _showError(errorMessage);
     } finally {
       if (mounted) {
         setState(() => _isLoading = false);
@@ -121,7 +234,14 @@ class _LoginPageState extends State<LoginPage> {
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(8),
         ),
-        duration: const Duration(seconds: 4),
+        duration: const Duration(seconds: 6),
+        action: SnackBarAction(
+          label: 'Retry',
+          textColor: Colors.white,
+          onPressed: () {
+            // Allow user to retry
+          },
+        ),
       ),
     );
   }
@@ -139,6 +259,44 @@ class _LoginPageState extends State<LoginPage> {
           borderRadius: BorderRadius.circular(8),
         ),
         duration: const Duration(seconds: 3),
+      ),
+    );
+  }
+
+  // Add method to handle app restart suggestion
+  void _showRestartAppDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1D1E33),
+        title: const Text(
+          'Authentication Issue',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: const Text(
+          'There seems to be an authentication state issue. Please restart the app and try again.',
+          style: TextStyle(color: Colors.grey),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _ensureCleanState();
+            },
+            child: const Text('Try Again', style: TextStyle(color: Color(0xFF667eea))),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              // In a real app, you might use exit(0) or restart functionality
+              _ensureCleanState();
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF667eea),
+            ),
+            child: const Text('OK', style: TextStyle(color: Colors.white)),
+          ),
+        ],
       ),
     );
   }
@@ -404,6 +562,21 @@ class _LoginPageState extends State<LoginPage> {
                     ),
 
                     const SizedBox(height: 24),
+
+                    // Troubleshooting button
+                    if (_isLoginMode) ...[
+                      TextButton(
+                        onPressed: _ensureCleanState,
+                        child: const Text(
+                          'Having trouble signing in? Tap to reset',
+                          style: TextStyle(
+                            color: Color(0xFF667eea),
+                            fontSize: 14,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                    ],
 
                     // Divider
                     const Row(

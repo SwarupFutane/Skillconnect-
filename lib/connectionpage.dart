@@ -1,9 +1,10 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'firebase_helper.dart';
-import 'chatpage.dart'; // Re-enable chat import
+import 'chatpage.dart';
 
 class ConnectionsPage extends StatefulWidget {
   const ConnectionsPage({Key? key}) : super(key: key);
@@ -12,7 +13,8 @@ class ConnectionsPage extends StatefulWidget {
   State<ConnectionsPage> createState() => _ConnectionsPageState();
 }
 
-class _ConnectionsPageState extends State<ConnectionsPage> with TickerProviderStateMixin {
+class _ConnectionsPageState extends State<ConnectionsPage>
+    with TickerProviderStateMixin, WidgetsBindingObserver, AutomaticKeepAliveClientMixin {
   late TabController _tabController;
   List<Map<String, dynamic>> _connections = [];
   List<Map<String, dynamic>> _pendingRequests = [];
@@ -20,17 +22,75 @@ class _ConnectionsPageState extends State<ConnectionsPage> with TickerProviderSt
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final FirebaseAuth _auth = FirebaseAuth.instance;
 
+  // Add stream subscriptions for real-time updates
+  StreamSubscription<QuerySnapshot>? _requestsSubscription;
+  StreamSubscription<QuerySnapshot>? _connectionsSubscription;
+
+  @override
+  bool get wantKeepAlive => true;
+
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
+    WidgetsBinding.instance.addObserver(this);
     _loadData();
+    _setupRealTimeListeners();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _tabController.dispose();
+    _requestsSubscription?.cancel();
+    _connectionsSubscription?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    // Refresh data when app becomes active
+    if (state == AppLifecycleState.resumed) {
+      _refreshData();
+    }
+  }
+
+  // Setup real-time listeners for automatic updates
+  void _setupRealTimeListeners() {
+    final user = _auth.currentUser;
+    if (user == null) return;
+
+    // Listen to connection requests in real-time
+    _requestsSubscription = _firestore
+        .collection('connection_requests')
+        .where('toUserId', isEqualTo: user.uid)
+        .where('status', isEqualTo: 'pending')
+        .snapshots()
+        .listen((snapshot) {
+      if (mounted) {
+        _loadPendingRequests();
+      }
+    }, onError: (error) {
+      print('Error listening to requests: $error');
+    });
+
+    // Listen to connections in real-time
+    _connectionsSubscription = _firestore
+        .collection('connections')
+        .where('participants', arrayContains: user.uid)
+        .snapshots()
+        .listen((snapshot) {
+      if (mounted) {
+        _loadConnections();
+      }
+    }, onError: (error) {
+      print('Error listening to connections: $error');
+    });
+  }
+
+  Future<void> _refreshData() async {
+    await _loadData();
   }
 
   Future<void> _loadData() async {
@@ -42,21 +102,30 @@ class _ConnectionsPageState extends State<ConnectionsPage> with TickerProviderSt
 
   Future<void> _loadConnections() async {
     try {
+      print('🔄 Loading connections...');
       final connections = await FirebaseHelper.getUserConnections();
-      setState(() {
-        _connections = connections;
-        _isLoading = false;
-      });
+
+      if (mounted) {
+        setState(() {
+          _connections = connections;
+          _isLoading = false;
+        });
+      }
+
+      print('✅ Loaded ${connections.length} connections');
     } catch (e) {
       print('Error loading connections: $e');
-      setState(() {
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     }
   }
 
   Future<void> _loadPendingRequests() async {
     try {
+      print('🔄 Loading pending requests...');
       final user = _auth.currentUser;
       if (user == null) return;
 
@@ -133,9 +202,13 @@ class _ConnectionsPageState extends State<ConnectionsPage> with TickerProviderSt
         return bTime.compareTo(aTime);
       });
 
-      setState(() {
-        _pendingRequests = requests;
-      });
+      if (mounted) {
+        setState(() {
+          _pendingRequests = requests;
+        });
+      }
+
+      print('✅ Loaded ${requests.length} pending requests');
     } catch (e) {
       print('Error loading pending requests: $e');
     }
@@ -143,7 +216,25 @@ class _ConnectionsPageState extends State<ConnectionsPage> with TickerProviderSt
 
   Future<void> _acceptConnectionRequest(String requestId) async {
     try {
+      print('🔄 Accepting connection request: $requestId');
+
+      // Show loading dialog
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => const Center(
+          child: CircularProgressIndicator(
+            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF667eea)),
+          ),
+        ),
+      );
+
       final success = await FirebaseHelper.acceptConnectionRequest(requestId);
+
+      // Close loading dialog
+      if (mounted) {
+        Navigator.pop(context);
+      }
 
       if (success && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -153,11 +244,26 @@ class _ConnectionsPageState extends State<ConnectionsPage> with TickerProviderSt
           ),
         );
 
-        // Reload data
+        // Reload data immediately
         await _loadData();
+
+        // Also trigger a broader refresh to update other parts of the app
+        if (context.mounted) {
+          // You can add a callback here to notify parent widgets
+          // For now, we'll rely on the real-time listeners
+        }
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Error accepting connection request'),
+            backgroundColor: Colors.red,
+          ),
+        );
       }
     } catch (e) {
+      // Close loading dialog if still open
       if (mounted) {
+        Navigator.pop(context);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Error accepting request: $e'),
@@ -170,9 +276,41 @@ class _ConnectionsPageState extends State<ConnectionsPage> with TickerProviderSt
 
   Future<void> _rejectConnectionRequest(String requestId) async {
     try {
+      // Show confirmation dialog
+      final bool? confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          backgroundColor: const Color(0xFF1D1E33),
+          title: const Text(
+            'Reject Connection Request',
+            style: TextStyle(color: Colors.white),
+          ),
+          content: const Text(
+            'Are you sure you want to reject this connection request?',
+            style: TextStyle(color: Colors.grey),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red,
+                foregroundColor: Colors.white,
+              ),
+              child: const Text('Reject'),
+            ),
+          ],
+        ),
+      );
+
+      if (confirmed != true) return;
+
       await _firestore.collection('connection_requests').doc(requestId).update({
         'status': 'rejected',
-        'updatedAt': FieldValue.serverTimestamp(),
+        'rejectedAt': FieldValue.serverTimestamp(),
       });
 
       if (mounted) {
@@ -198,28 +336,56 @@ class _ConnectionsPageState extends State<ConnectionsPage> with TickerProviderSt
     }
   }
 
-  void _openChat(Map<String, dynamic> connection) {
-    // For now, show a placeholder message
+  void _openChat(Map<String, dynamic> connection) async {
+    try {
+      print('🔄 Opening chat with: ${connection['name']}');
+      print('📋 Connection data: $connection');
 
+      // Ensure connection document exists with proper ID
+      String connectionId;
 
-    Navigator.push(
-       context,
-       MaterialPageRoute(
-         builder: (context) => ChatPage(
-           connectionId: connection['connectionId'],
-           otherUserId: connection['otherUserId'],
-           otherUserName: connection['name'],
-           otherUserImage: connection['profileImage'],
-         ),
-       ),
-     ).then((_) {
+      if (connection['connectionId'] != null && connection['connectionId'].isNotEmpty) {
+        connectionId = connection['connectionId'];
+        print('✅ Using existing connection ID: $connectionId');
+      } else {
+        // Create new connection if ID is missing
+        connectionId = await FirebaseHelper.createOrGetConnection(connection['otherUserId']);
+        print('✅ Created new connection ID: $connectionId');
+      }
 
-       _loadConnections();
-     });
+      // Navigate to chat
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => ChatPage(
+            connectionId: connectionId,
+            otherUserId: connection['otherUserId'],
+            otherUserName: connection['name'],
+            otherUserImage: connection['profileImage'],
+          ),
+        ),
+      ).then((_) {
+        // Reload connections when returning from chat
+        _loadConnections();
+      });
+
+    } catch (e) {
+      print('❌ Error opening chat: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error opening chat: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // Required for AutomaticKeepAliveClientMixin
+
     if (_isLoading) {
       return const Center(
         child: CircularProgressIndicator(
@@ -268,52 +434,81 @@ class _ConnectionsPageState extends State<ConnectionsPage> with TickerProviderSt
 
   Widget _buildConnectionsList() {
     if (_connections.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              width: 80,
-              height: 80,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: const Color(0xFF1D1E33),
-                border: Border.all(color: const Color(0xFF667eea), width: 2),
-              ),
-              child: const Icon(
-                Icons.people_outline,
-                color: Colors.grey,
-                size: 40,
+      return RefreshIndicator(
+        onRefresh: _refreshData,
+        color: const Color(0xFF667eea),
+        backgroundColor: const Color(0xFF1D1E33),
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          child: Container(
+            height: MediaQuery.of(context).size.height * 0.6,
+            child: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 80,
+                    height: 80,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: const Color(0xFF1D1E33),
+                      border: Border.all(color: const Color(0xFF667eea), width: 2),
+                    ),
+                    child: const Icon(
+                      Icons.people_outline,
+                      color: Colors.grey,
+                      size: 40,
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  const Text(
+                    'No Connections Yet',
+                    style: TextStyle(
+                      fontSize: 20,
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    'Start connecting with other users\nto expand your network!',
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.grey,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 20),
+                  ElevatedButton.icon(
+                    onPressed: () {
+                      // Navigate to discover page
+                      DefaultTabController.of(context)?.animateTo(0);
+                    },
+                    icon: const Icon(Icons.search, size: 18),
+                    label: const Text('Discover People'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF667eea),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(height: 20),
-            const Text(
-              'No Connections Yet',
-              style: TextStyle(
-                fontSize: 20,
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              'Start connecting with other users\nto expand your network!',
-              style: TextStyle(
-                fontSize: 14,
-                color: Colors.grey,
-              ),
-              textAlign: TextAlign.center,
-            ),
-          ],
+          ),
         ),
       );
     }
 
     return RefreshIndicator(
-      onRefresh: _loadConnections,
+      onRefresh: _refreshData,
       color: const Color(0xFF667eea),
       backgroundColor: const Color(0xFF1D1E33),
       child: ListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.all(16),
         itemCount: _connections.length,
         itemBuilder: (context, index) {
@@ -326,51 +521,63 @@ class _ConnectionsPageState extends State<ConnectionsPage> with TickerProviderSt
 
   Widget _buildRequestsList() {
     if (_pendingRequests.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              width: 80,
-              height: 80,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: const Color(0xFF1D1E33),
-                border: Border.all(color: const Color(0xFF667eea), width: 2),
-              ),
-              child: const Icon(
-                Icons.mail_outline,
-                color: Colors.grey,
-                size: 40,
+      return RefreshIndicator(
+        onRefresh: _refreshData,
+        color: const Color(0xFF667eea),
+        backgroundColor: const Color(0xFF1D1E33),
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          child: Container(
+            height: MediaQuery.of(context).size.height * 0.6,
+            child: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 80,
+                    height: 80,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: const Color(0xFF1D1E33),
+                      border: Border.all(color: const Color(0xFF667eea), width: 2),
+                    ),
+                    child: const Icon(
+                      Icons.mail_outline,
+                      color: Colors.grey,
+                      size: 40,
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  const Text(
+                    'No Pending Requests',
+                    style: TextStyle(
+                      fontSize: 20,
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    'Connection requests will appear here',
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.grey,
+                    ),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(height: 20),
-            const Text(
-              'No Pending Requests',
-              style: TextStyle(
-                fontSize: 20,
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              'Connection requests will appear here',
-              style: TextStyle(
-                fontSize: 14,
-                color: Colors.grey,
-              ),
-            ),
-          ],
+          ),
         ),
       );
     }
 
     return RefreshIndicator(
-      onRefresh: _loadPendingRequests,
+      onRefresh: _refreshData,
       color: const Color(0xFF667eea),
       backgroundColor: const Color(0xFF1D1E33),
       child: ListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.all(16),
         itemCount: _pendingRequests.length,
         itemBuilder: (context, index) {

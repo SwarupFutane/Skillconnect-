@@ -9,9 +9,11 @@ plugins {
 }
 
 android {
+    // ✅ FIXED: Set NDK version to required version
+    ndkVersion = "27.0.12077973"
+
     namespace = "com.example.skillconnect"
     compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
@@ -27,8 +29,9 @@ android {
         applicationId = "com.example.skillconnect"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = 21
-        minSdk = flutter.minSdkVersion
+
+        // ✅ FIXED: Updated minSdk to 23 for Firebase Auth compatibility
+        minSdk = 23
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName

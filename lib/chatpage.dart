@@ -37,6 +37,7 @@ class _ChatPageState extends State<ChatPage> {
     _loadOtherUserData();
     _markMessagesAsRead();
     _listenToTypingStatus();
+    _debugFirebaseConnection();
   }
 
   @override
@@ -46,6 +47,84 @@ class _ChatPageState extends State<ChatPage> {
     _updateTypingStatus(false);
     super.dispose();
   }
+  Future<void> _debugFirebaseConnection() async {
+    try {
+      print('🐛 === FIREBASE DEBUG START ===');
+
+      // Check authentication
+      final user = _auth.currentUser;
+      print('🐛 User authenticated: ${user != null}');
+      print('🐛 User ID: ${user?.uid}');
+      print('🐛 User email: ${user?.email}');
+
+      if (user == null) {
+        print('❌ No authenticated user - cannot proceed');
+        return;
+      }
+
+      // Test Firestore connection
+      print('🐛 Testing Firestore connection...');
+      await _firestore.enableNetwork();
+      print('✅ Firestore network enabled');
+
+      // Check user document
+      final userDoc = await _firestore.collection('users').doc(user.uid).get();
+      print('🐛 User document exists: ${userDoc.exists}');
+      if (userDoc.exists) {
+        print('🐛 User data: ${userDoc.data()}');
+      }
+
+      // Check connection document
+      print('🐛 Connection ID being used: ${widget.connectionId}');
+      final connectionDoc = await _firestore.collection('connections').doc(widget.connectionId).get();
+      print('🐛 Connection document exists: ${connectionDoc.exists}');
+      if (connectionDoc.exists) {
+        print('🐛 Connection data: ${connectionDoc.data()}');
+      } else {
+        print('⚠️ Connection document missing - this might be the issue!');
+      }
+
+      // Test write permission with a simple test document
+      print('🐛 Testing write permissions...');
+      try {
+        await _firestore.collection('test_debug').add({
+          'userId': user.uid,
+          'timestamp': FieldValue.serverTimestamp(),
+          'test': true,
+        });
+        print('✅ Write permission test successful');
+
+        // Clean up test document
+        final testDocs = await _firestore.collection('test_debug').where('userId', isEqualTo: user.uid).get();
+        for (var doc in testDocs.docs) {
+          await doc.reference.delete();
+        }
+        print('✅ Test cleanup completed');
+
+      } catch (e) {
+        print('❌ Write permission test failed: $e');
+      }
+
+      // Check messages collection access
+      print('🐛 Testing messages collection access...');
+      try {
+        final messagesQuery = await _firestore
+            .collection('messages')
+            .where('connectionId', isEqualTo: widget.connectionId)
+            .limit(1)
+            .get();
+        print('✅ Messages collection accessible - found ${messagesQuery.docs.length} messages');
+      } catch (e) {
+        print('❌ Messages collection access failed: $e');
+      }
+
+      print('🐛 === FIREBASE DEBUG END ===');
+    } catch (e) {
+      print('🐛 Debug error: $e');
+      print('🐛 Error type: ${e.runtimeType}');
+    }
+  }
+
 
   Future<void> _loadOtherUserData() async {
     try {
@@ -124,15 +203,47 @@ class _ChatPageState extends State<ChatPage> {
     if (_messageController.text.trim().isEmpty) return;
 
     try {
+      print('🔄 Starting message send process...');
+
       final userId = _auth.currentUser?.uid;
-      if (userId == null) return;
+      if (userId == null) {
+        throw Exception('User not authenticated');
+      }
+
+      print('✅ User authenticated: $userId');
+      print('📋 Connection ID: ${widget.connectionId}');
+      print('📋 Other User ID: ${widget.otherUserId}');
+
+      // Test Firestore connection first
+      print('🔄 Testing Firestore connection...');
+      try {
+        await _firestore.enableNetwork();
+        print('✅ Firestore network enabled');
+
+        // Test read operation
+        final testDoc = await _firestore.collection('users').doc(userId).get();
+        print('✅ Test read successful - user doc exists: ${testDoc.exists}');
+
+      } catch (e) {
+        print('❌ Firestore connection test failed: $e');
+        throw Exception('Firestore connection failed: $e');
+      }
 
       final messageText = _messageController.text.trim();
-      _messageController.clear();
-      _updateTypingStatus(false);
+      print('📝 Message text: $messageText');
 
-      // Add message to Firestore
-      await _firestore.collection('messages').add({
+      // Clear input and update typing status
+      _messageController.clear();
+      await _updateTypingStatus(false);
+
+      // Ensure connection document exists before sending message
+      print('🔄 Checking/creating connection document...');
+      await _ensureConnectionExists();
+
+      print('🔄 Adding message to Firestore...');
+
+      // Create message data
+      final messageData = {
         'connectionId': widget.connectionId,
         'senderId': userId,
         'receiverId': widget.otherUserId,
@@ -140,14 +251,25 @@ class _ChatPageState extends State<ChatPage> {
         'timestamp': FieldValue.serverTimestamp(),
         'isRead': false,
         'messageType': 'text',
-      });
+      };
+
+      print('📋 Message data: $messageData');
+
+      // Add message to Firestore
+      DocumentReference messageRef = await _firestore.collection('messages').add(messageData);
+      print('✅ Message added with ID: ${messageRef.id}');
 
       // Update connection with last message
-      await _firestore.collection('connections').doc(widget.connectionId).update({
+      print('🔄 Updating connection document...');
+      await _firestore.collection('connections').doc(widget.connectionId).set({
         'lastMessage': messageText,
         'lastMessageTime': FieldValue.serverTimestamp(),
         'unreadCount.${widget.otherUserId}': FieldValue.increment(1),
-      });
+        'participants': [userId, widget.otherUserId],
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      print('✅ Connection updated successfully');
 
       // Auto-scroll to bottom
       if (_scrollController.hasClients) {
@@ -157,16 +279,69 @@ class _ChatPageState extends State<ChatPage> {
           curve: Curves.easeOut,
         );
       }
+
+      print('✅ Message sent successfully!');
+
+    } on FirebaseException catch (e) {
+      print('❌ Firebase error: ${e.code} - ${e.message}');
+      print('❌ Firebase error details: ${e.toString()}');
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Firebase error: ${e.code} - ${e.message}'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error sending message: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      print('❌ General error sending message: $e');
+      print('❌ Error type: ${e.runtimeType}');
+      print('❌ Stack trace: ${StackTrace.current}');
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error sending message: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
     }
   }
+  Future<void> _ensureConnectionExists() async {
+    try {
+      print('🔄 Checking if connection document exists...');
 
+      final connectionDoc = await _firestore.collection('connections').doc(widget.connectionId).get();
+
+      if (!connectionDoc.exists) {
+        print('⚠️ Connection document does not exist, creating...');
+
+        final userId = _auth.currentUser!.uid;
+        await _firestore.collection('connections').doc(widget.connectionId).set({
+          'participants': [userId, widget.otherUserId],
+          'createdAt': FieldValue.serverTimestamp(),
+          'lastMessage': '',
+          'lastMessageTime': FieldValue.serverTimestamp(),
+          'unreadCount': {
+            userId: 0,
+            widget.otherUserId: 0,
+          },
+        });
+
+        print('✅ Connection document created');
+      } else {
+        print('✅ Connection document already exists');
+        print('📋 Connection data: ${connectionDoc.data()}');
+      }
+    } catch (e) {
+      print('❌ Error ensuring connection exists: $e');
+      throw e;
+    }
+  }
   @override
   Widget build(BuildContext context) {
     return Scaffold(

@@ -1,5 +1,7 @@
 import 'dart:io';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:skillconnect/privacy_settings.dart';
+import 'Help_and_Support.dart';
 import 'edit_profilepage.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -7,6 +9,7 @@ import 'dart:convert';
 import 'connectionpage.dart';
 import 'discover_userpage.dart';
 import 'firebase_helper.dart';
+import 'notificationsettings.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({Key? key}) : super(key: key);
@@ -15,7 +18,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
+class _HomePageState extends State<HomePage> with TickerProviderStateMixin, WidgetsBindingObserver {
   late TabController _tabController;
   Map<String, dynamic> _userProfile = {};
   List<Map<String, dynamic>> _suggestedConnections = [];
@@ -23,6 +26,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   int _currentStreak = 0;
   bool _isLoading = true;
   int _notificationCount = 0;
+
+  // Add refresh key for child widgets
+  final GlobalKey<_HomePageState> _homeKey = GlobalKey<_HomePageState>();
 
   Future<void> _editProfile() async {
     final result = await Navigator.push(
@@ -46,18 +52,42 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     }
   }
 
-
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 4, vsync: this);
+    WidgetsBinding.instance.addObserver(this);
     _initializeApp();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _tabController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+
+    // Refresh data when app becomes active
+    if (state == AppLifecycleState.resumed) {
+      _refreshAllData();
+    }
+  }
+
+  // Add method to refresh all data
+  Future<void> _refreshAllData() async {
+    try {
+      await Future.wait([
+        _loadUserData(),
+        _loadSuggestedConnections(),
+        _loadNotificationCount(),
+      ]);
+    } catch (e) {
+      print('Error refreshing data: $e');
+    }
   }
 
   Future<void> _initializeApp() async {
@@ -111,9 +141,11 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   Future<void> _loadNotificationCount() async {
     try {
       final count = await FirebaseHelper.getNotificationCount();
-      setState(() {
-        _notificationCount = count;
-      });
+      if (mounted) {
+        setState(() {
+          _notificationCount = count;
+        });
+      }
     } catch (e) {
       print('Error loading notification count: $e');
     }
@@ -131,18 +163,22 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       // Load real mentorship opportunities
       final opportunities = await FirebaseHelper.getMentorshipOpportunities();
 
-      setState(() {
-        _suggestedConnections = suggestions;
-        _mentorshipOpportunities = opportunities;
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _suggestedConnections = suggestions;
+          _mentorshipOpportunities = opportunities;
+          _isLoading = false;
+        });
+      }
 
       print('✅ Loaded ${suggestions.length} suggestions and ${opportunities.length} opportunities');
     } catch (e) {
       print('⚠️ Error loading connections: $e');
-      setState(() {
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     }
   }
 
@@ -165,7 +201,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           ),
         );
 
-        // Refresh suggestions
+        // Refresh suggestions to remove the user we just sent a request to
         await _loadSuggestedConnections();
       } else if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -263,13 +299,14 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     }
 
     return Scaffold(
+      key: _homeKey,
       backgroundColor: const Color(0xFF0A0E21),
       appBar: _buildAppBar(),
       body: TabBarView(
         controller: _tabController,
         children: [
           _buildDiscoverTab(),
-          const ConnectionsPage(),
+          ConnectionsPage(key: ValueKey('connections_${DateTime.now().millisecondsSinceEpoch}')),
           _buildMentorshipTab(),
           _buildProfileTab(),
         ],
@@ -456,84 +493,94 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   }
 
   Widget _buildDiscoverTab() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Welcome Section
-          _buildWelcomeCard(),
-          const SizedBox(height: 24),
+    return RefreshIndicator(
+      onRefresh: _refreshAllData,
+      color: const Color(0xFF667eea),
+      backgroundColor: const Color(0xFF1D1E33),
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Welcome Section
+            _buildWelcomeCard(),
+            const SizedBox(height: 24),
 
-          // Quick Stats
-          _buildQuickStats(),
-          const SizedBox(height: 24),
+            // Quick Stats
+            _buildQuickStats(),
+            const SizedBox(height: 24),
 
-          // Suggested Connections
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                'Suggested Connections',
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.white,
+            // Suggested Connections
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Suggested Connections',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
                 ),
-              ),
-              TextButton(
-                onPressed: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => const DiscoverUsersPage(),
-                    ),
-                  );
-                },
-                child: const Text(
-                  'View All',
-                  style: TextStyle(color: Color(0xFF667eea)),
+                TextButton(
+                  onPressed: () async {
+                    final result = await Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => const DiscoverUsersPage(),
+                      ),
+                    );
+                    // Refresh data when coming back from discover page
+                    if (result != null || mounted) {
+                      await _refreshAllData();
+                    }
+                  },
+                  child: const Text(
+                    'View All',
+                    style: TextStyle(color: Color(0xFF667eea)),
+                  ),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
+              ],
+            ),
+            const SizedBox(height: 12),
 
-          // Connection Cards
-          if (_suggestedConnections.isEmpty)
-            Center(
-              child: Column(
-                children: [
-                  const SizedBox(height: 40),
-                  Icon(
-                    Icons.people_outline,
-                    size: 60,
-                    color: Colors.grey[600],
-                  ),
-                  const SizedBox(height: 16),
-                  const Text(
-                    'No suggestions yet',
-                    style: TextStyle(
-                      fontSize: 16,
-                      color: Colors.grey,
+            // Connection Cards
+            if (_suggestedConnections.isEmpty)
+              Center(
+                child: Column(
+                  children: [
+                    const SizedBox(height: 40),
+                    Icon(
+                      Icons.people_outline,
+                      size: 60,
+                      color: Colors.grey[600],
                     ),
-                  ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Complete your profile to see suggested connections',
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: Colors.grey,
+                    const SizedBox(height: 16),
+                    const Text(
+                      'No suggestions yet',
+                      style: TextStyle(
+                        fontSize: 16,
+                        color: Colors.grey,
+                      ),
                     ),
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-              ),
-            )
-          else
-            ...(_suggestedConnections.take(2).map((connection) =>
-                _buildConnectionCard(connection)).toList()),
-        ],
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Complete your profile to see suggested connections',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.grey,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
+              )
+            else
+              ...(_suggestedConnections.take(2).map((connection) =>
+                  _buildConnectionCard(connection)).toList()),
+          ],
+        ),
       ),
     );
   }
@@ -574,13 +621,16 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
             children: [
               Expanded(
                 child: ElevatedButton.icon(
-                  onPressed: () {
-                    Navigator.push(
+                  onPressed: () async {
+                    final result = await Navigator.push(
                       context,
                       MaterialPageRoute(
                         builder: (context) => const DiscoverUsersPage(),
                       ),
                     );
+                    if (result != null || mounted) {
+                      await _refreshAllData();
+                    }
                   },
                   icon: const Icon(Icons.flash_on, size: 18),
                   label: const Text('Quick Match'),
@@ -595,13 +645,16 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               ),
               const SizedBox(width: 12),
               ElevatedButton(
-                onPressed: () {
-                  Navigator.push(
+                onPressed: () async {
+                  final result = await Navigator.push(
                     context,
                     MaterialPageRoute(
                       builder: (context) => const DiscoverUsersPage(),
                     ),
                   );
+                  if (result != null || mounted) {
+                    await _refreshAllData();
+                  }
                 },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.white24,
@@ -868,97 +921,111 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   }
 
   Widget _buildMentorshipTab() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Mentorship Header
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
-              gradient: LinearGradient(
-                colors: [Colors.orange[600]!, Colors.deepOrange[600]!],
+    return RefreshIndicator(
+      onRefresh: _refreshAllData,
+      color: const Color(0xFF667eea),
+      backgroundColor: const Color(0xFF1D1E33),
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Mentorship Header
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(16),
+                gradient: LinearGradient(
+                  colors: [Colors.orange[600]!, Colors.deepOrange[600]!],
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Mentorship Hub 🎓',
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Share knowledge, earn streaks, build connections',
+                    style: TextStyle(
+                      fontSize: 16,
+                      color: Colors.white70,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      const Icon(Icons.local_fire_department, color: Colors.white),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Current Streak: $_currentStreak days',
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Mentorship Hub 🎓',
-                  style: TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Share knowledge, earn streaks, build connections',
-                  style: TextStyle(
-                    fontSize: 16,
-                    color: Colors.white70,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Row(
+            const SizedBox(height: 24),
+
+            // Mentorship Opportunities
+            const Text(
+              'Available Opportunities',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            // Show real mentorship opportunities
+            if (_mentorshipOpportunities.isEmpty)
+              Center(
+                child: Column(
                   children: [
-                    const Icon(Icons.local_fire_department, color: Colors.white),
-                    const SizedBox(width: 8),
-                    Text(
-                      'Current Streak: $_currentStreak days',
-                      style: const TextStyle(
+                    const SizedBox(height: 40),
+                    Icon(
+                      Icons.school_outlined,
+                      size: 60,
+                      color: Colors.grey[600],
+                    ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      'No mentorship opportunities yet',
+                      style: TextStyle(
                         fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
+                        color: Colors.grey,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Check back later for new opportunities',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.grey,
                       ),
                     ),
                   ],
                 ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 24),
-
-          // Mentorship Opportunities
-          const Text(
-            'Available Opportunities',
-            style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-              color: Colors.white,
-            ),
-          ),
-          const SizedBox(height: 12),
-
-          // Show real mentorship opportunities
-          if (_mentorshipOpportunities.isEmpty)
-            Center(
-              child: Column(
-                children: [
-                  const SizedBox(height: 40),
-                  Icon(
-                    Icons.school_outlined,
-                    size: 60,
-                    color: Colors.grey[600],
-                  ),
-                  const SizedBox(height: 16),
-                  const Text(
-                    'No mentorship opportunities yet',
-                    style: TextStyle(
-                      fontSize: 16,
-                      color: Colors.grey,
-                    ),
-                  ),
-                ],
-              ),
-            )
-          else
-            ..._mentorshipOpportunities.map((opportunity) =>
-                _buildMentorshipCard(opportunity)).toList(),
-        ],
+              )
+            else
+              ..._mentorshipOpportunities.map((opportunity) =>
+                  _buildMentorshipCard(opportunity)).toList(),
+          ],
+        ),
       ),
     );
   }
@@ -1038,9 +1105,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           ),
           const SizedBox(height: 12),
           ElevatedButton(
-            onPressed: () {
-              _acceptMentorship(opportunity);
-            },
+            onPressed: () => _acceptMentorship(opportunity),
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.orange[600],
               foregroundColor: Colors.white,
@@ -1073,254 +1138,260 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   }
 
   Widget _buildProfileTab() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        children: [
-          // Profile Header
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: const Color(0xFF1D1E33),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: const Color(0xFF2A2D3A)),
-            ),
-            child: Column(
-              children: [
-                // Profile Picture
-                Container(
-                  width: 80,
-                  height: 80,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    border: Border.all(color: const Color(0xFF667eea), width: 3),
-                  ),
-                  child: _userProfile['profileImage'] != null
-                      ? ClipOval(
-                    child: Image.file(
-                      File(_userProfile['profileImage']),
-                      fit: BoxFit.cover,
+    return RefreshIndicator(
+      onRefresh: _refreshAllData,
+      color: const Color(0xFF667eea),
+      backgroundColor: const Color(0xFF1D1E33),
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          children: [
+            // Profile Header
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1D1E33),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: const Color(0xFF2A2D3A)),
+              ),
+              child: Column(
+                children: [
+                  // Profile Picture
+                  Container(
+                    width: 80,
+                    height: 80,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(color: const Color(0xFF667eea), width: 3),
                     ),
-                  )
-                      : const Icon(Icons.person, color: Colors.grey, size: 40),
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  _userProfile['name'] ?? 'User Name',
-                  style: const TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
+                    child: _userProfile['profileImage'] != null
+                        ? ClipOval(
+                      child: Image.file(
+                        File(_userProfile['profileImage']),
+                        fit: BoxFit.cover,
+                      ),
+                    )
+                        : const Icon(Icons.person, color: Colors.grey, size: 40),
                   ),
-                ),
-                const SizedBox(height: 8),
-                if (_userProfile['bio'] != null && _userProfile['bio'].toString().isNotEmpty)
+                  const SizedBox(height: 16),
                   Text(
-                    _userProfile['bio'],
+                    _userProfile['name'] ?? 'User Name',
                     style: const TextStyle(
-                      fontSize: 16,
-                      color: Colors.grey,
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                const SizedBox(height: 8),
-                if (_userProfile['location'] != null && _userProfile['location'].toString().isNotEmpty)
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Icon(Icons.location_on, color: Colors.grey, size: 16),
-                      const SizedBox(width: 4),
-                      Text(
-                        _userProfile['location'],
-                        style: const TextStyle(
-                          fontSize: 14,
-                          color: Colors.grey,
-                        ),
-                      ),
-                    ],
-                  ),
-                const SizedBox(height: 16),
-
-                // Edit Profile Button
-                ElevatedButton.icon(
-                  onPressed: () => _editProfile(),
-                  icon: const Icon(Icons.edit),
-                  label: const Text('Edit Profile'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF667eea),
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
                     ),
                   ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 24),
-
-          // Skills Summary
-          if (_userProfile['skillsOffered'] != null && (_userProfile['skillsOffered'] as List).isNotEmpty) ...[
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: const Color(0xFF1D1E33),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: const Color(0xFF2A2D3A)),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Row(
-                    children: [
-                      Icon(Icons.lightbulb, color: Colors.green, size: 20),
-                      SizedBox(width: 8),
-                      Text(
-                        'Skills I Offer',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                        ),
+                  const SizedBox(height: 8),
+                  if (_userProfile['bio'] != null && _userProfile['bio'].toString().isNotEmpty)
+                    Text(
+                      _userProfile['bio'],
+                      style: const TextStyle(
+                        fontSize: 16,
+                        color: Colors.grey,
                       ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: (_userProfile['skillsOffered'] as List).take(6).map<Widget>((skill) {
-                      return Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: Colors.green.withOpacity(0.2),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: Colors.green.withOpacity(0.3)),
-                        ),
-                        child: Text(
-                          skill['name'],
+                      textAlign: TextAlign.center,
+                    ),
+                  const SizedBox(height: 8),
+                  if (_userProfile['location'] != null && _userProfile['location'].toString().isNotEmpty)
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.location_on, color: Colors.grey, size: 16),
+                        const SizedBox(width: 4),
+                        Text(
+                          _userProfile['location'],
                           style: const TextStyle(
-                            color: Colors.green,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w500,
+                            fontSize: 14,
+                            color: Colors.grey,
                           ),
                         ),
-                      );
-                    }).toList(),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-          ],
+                      ],
+                    ),
+                  const SizedBox(height: 16),
 
-          if (_userProfile['skillsWanted'] != null && (_userProfile['skillsWanted'] as List).isNotEmpty) ...[
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: const Color(0xFF1D1E33),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: const Color(0xFF2A2D3A)),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Row(
-                    children: [
-                      Icon(Icons.school, color: Colors.orange, size: 20),
-                      SizedBox(width: 8),
-                      Text(
-                        'Skills I Want to Learn',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                        ),
+                  // Edit Profile Button
+                  ElevatedButton.icon(
+                    onPressed: () => _editProfile(),
+                    icon: const Icon(Icons.edit),
+                    label: const Text('Edit Profile'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF667eea),
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
                       ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: (_userProfile['skillsWanted'] as List).take(6).map<Widget>((skill) {
-                      return Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: Colors.orange.withOpacity(0.2),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: Colors.orange.withOpacity(0.3)),
-                        ),
-                        child: Text(
-                          skill['name'],
-                          style: const TextStyle(
-                            color: Colors.orange,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      );
-                    }).toList(),
+                    ),
                   ),
                 ],
               ),
             ),
             const SizedBox(height: 24),
-          ],
 
-          // Settings Options
-          _buildSettingsOption(
-            Icons.notifications_outlined,
-            'Notifications',
-            'Manage your notification preferences',
-                () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Notification settings coming soon!'),
-                  backgroundColor: Color(0xFF667eea),
+            // Skills Summary
+            if (_userProfile['skillsOffered'] != null && (_userProfile['skillsOffered'] as List).isNotEmpty) ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1D1E33),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFF2A2D3A)),
                 ),
-              );
-            },
-          ),
-          _buildSettingsOption(
-            Icons.privacy_tip_outlined,
-            'Privacy',
-            'Control your privacy settings',
-                () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Privacy settings coming soon!'),
-                  backgroundColor: Color(0xFF667eea),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.lightbulb, color: Colors.green, size: 20),
+                        SizedBox(width: 8),
+                        Text(
+                          'Skills I Offer',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: (_userProfile['skillsOffered'] as List).take(6).map<Widget>((skill) {
+                        return Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: Colors.green.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: Colors.green.withOpacity(0.3)),
+                          ),
+                          child: Text(
+                            skill['name'],
+                            style: const TextStyle(
+                              color: Colors.green,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ],
                 ),
-              );
-            },
-          ),
-          _buildSettingsOption(
-            Icons.help_outline,
-            'Help & Support',
-            'Get help or contact support',
-                () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Help & Support coming soon!'),
-                  backgroundColor: Color(0xFF667eea),
+              ),
+              const SizedBox(height: 16),
+            ],
+
+            if (_userProfile['skillsWanted'] != null && (_userProfile['skillsWanted'] as List).isNotEmpty) ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1D1E33),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFF2A2D3A)),
                 ),
-              );
-            },
-          ),
-          _buildSettingsOption(
-            Icons.logout,
-            'Sign Out',
-            'Sign out of your account',
-                () async {
-              await _signOut();
-            },
-            isDestructive: true,
-          ),
-        ],
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.school, color: Colors.orange, size: 20),
+                        SizedBox(width: 8),
+                        Text(
+                          'Skills I Want to Learn',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: (_userProfile['skillsWanted'] as List).take(6).map<Widget>((skill) {
+                        return Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: Colors.orange.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: Colors.orange.withOpacity(0.3)),
+                          ),
+                          child: Text(
+                            skill['name'],
+                            style: const TextStyle(
+                              color: Colors.orange,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 24),
+            ],
+
+            // Settings Options
+            _buildSettingsOption(
+              Icons.notifications_outlined,
+              'Notifications',
+              'Manage your notification preferences',
+                  () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const NotificationSettingsPage(),
+                  ),
+                );
+              },
+            ),
+            _buildSettingsOption(
+              Icons.privacy_tip_outlined,
+              'Privacy',
+              'Control your privacy settings',
+                  () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const PrivacySettingsPage(),
+                  ),
+                );
+              },
+            ),
+            _buildSettingsOption(
+              Icons.help_outline,
+              'Help & Support',
+              'Get help or contact support',
+                  () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const HelpSupportPage(),
+                  ),
+                );
+              },
+            ),
+            _buildSettingsOption(
+              Icons.logout,
+              'Sign Out',
+              'Sign out of your account',
+                  () async {
+                await _signOut();
+              },
+              isDestructive: true,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1363,42 +1434,123 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   void _acceptMentorship(Map<String, dynamic> opportunity) async {
     try {
-      // Update streak
-      await FirebaseHelper.updateMentorshipStreak();
-      final prefs = await SharedPreferences.getInstance();
-      final newStreak = prefs.getInt('mentorStreak') ?? 0;
-
-      setState(() {
-        _currentStreak = newStreak;
-        _mentorshipOpportunities.remove(opportunity);
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Mentorship accepted! Streak: $_currentStreak days 🔥'),
-          backgroundColor: Colors.green,
+      // Show confirmation dialog
+      final bool? confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          backgroundColor: const Color(0xFF1D1E33),
+          title: const Text(
+            'Accept Mentorship',
+            style: TextStyle(color: Colors.white),
+          ),
+          content: Text(
+            'Are you sure you want to accept this mentorship opportunity? This will create a connection with the mentor.',
+            style: const TextStyle(color: Colors.grey),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.orange[600],
+                foregroundColor: Colors.white,
+              ),
+              child: const Text('Accept'),
+            ),
+          ],
         ),
       );
+
+      if (confirmed != true) return;
+
+      // Accept mentorship using enhanced Firebase helper
+      final success = await FirebaseHelper.acceptMentorship(opportunity);
+
+      if (success && mounted) {
+        // Update streak
+        final prefs = await SharedPreferences.getInstance();
+        final newStreak = prefs.getInt('mentorStreak') ?? 0;
+
+        setState(() {
+          _currentStreak = newStreak;
+          _mentorshipOpportunities.remove(opportunity);
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Mentorship accepted! Streak: $_currentStreak days 🔥'),
+            backgroundColor: Colors.green,
+          ),
+        );
+
+        // Refresh all data to update connections
+        await _refreshAllData();
+
+        // Optionally navigate to connections tab to show the new connection
+        _tabController.animateTo(1);
+
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Error accepting mentorship'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error accepting mentorship: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error accepting mentorship: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
   }
 
-  // Replace your _signOut method in homepage.dart with this simpler version:
-
   Future<void> _signOut() async {
     try {
+      // Show confirmation dialog
+      final bool? confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          backgroundColor: const Color(0xFF1D1E33),
+          title: const Text(
+            'Sign Out',
+            style: TextStyle(color: Colors.white),
+          ),
+          content: const Text(
+            'Are you sure you want to sign out?',
+            style: TextStyle(color: Colors.grey),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red,
+                foregroundColor: Colors.white,
+              ),
+              child: const Text('Sign Out'),
+            ),
+          ],
+        ),
+      );
+
+      if (confirmed != true) return;
+
       print('🔄 Starting sign out from HomePage...');
 
-      // Use Firebase Helper's signOut method (it handles online status)
+      // Use the enhanced sign out method
       await FirebaseHelper.signOut();
 
-      // Navigate to login with complete stack clear
       if (mounted) {
         Navigator.of(context).pushNamedAndRemoveUntil(
           '/login',
@@ -1419,7 +1571,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     } catch (e) {
       print('HomePage sign out error: $e');
 
-      // Even if Firebase Helper fails, navigate to login
+      // Force navigation to login even if there's an error
       if (mounted) {
         Navigator.of(context).pushNamedAndRemoveUntil(
           '/login',

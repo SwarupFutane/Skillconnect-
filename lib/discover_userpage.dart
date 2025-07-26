@@ -12,7 +12,7 @@ class DiscoverUsersPage extends StatefulWidget {
   State<DiscoverUsersPage> createState() => _DiscoverUsersPageState();
 }
 
-class _DiscoverUsersPageState extends State<DiscoverUsersPage> with TickerProviderStateMixin {
+class _DiscoverUsersPageState extends State<DiscoverUsersPage> with TickerProviderStateMixin, WidgetsBindingObserver {
   late TabController _tabController;
   final TextEditingController _searchController = TextEditingController();
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
@@ -25,6 +25,10 @@ class _DiscoverUsersPageState extends State<DiscoverUsersPage> with TickerProvid
   String _experienceFilter = '';
   bool _isLoading = true;
   Map<String, dynamic> _userProfile = {};
+
+  // Add these sets to track connected users and pending requests
+  Set<String> _connectedUserIds = {};
+  Set<String> _pendingRequestUserIds = {};
 
   final List<String> _skillCategories = [
     'Programming', 'Design', 'Marketing', 'Business',
@@ -39,15 +43,88 @@ class _DiscoverUsersPageState extends State<DiscoverUsersPage> with TickerProvid
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
+    WidgetsBinding.instance.addObserver(this);
     _loadUserProfile();
     _loadUsers();
+
+    // Listen to connection updates
+    _listenToConnectionUpdates();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _tabController.dispose();
     _searchController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    // Refresh data when app becomes active
+    if (state == AppLifecycleState.resumed) {
+      _refreshData();
+    }
+  }
+
+  // Add method to listen to connection updates in real-time
+  void _listenToConnectionUpdates() {
+    final userId = _auth.currentUser?.uid;
+    if (userId == null) return;
+
+    // Listen to connection requests
+    _firestore
+        .collection('connection_requests')
+        .where('fromUserId', isEqualTo: userId)
+        .snapshots()
+        .listen((snapshot) {
+      final pendingIds = <String>{};
+      final acceptedIds = <String>{};
+
+      for (var doc in snapshot.docs) {
+        final data = doc.data();
+        final status = data['status'];
+        final toUserId = data['toUserId'];
+
+        if (status == 'pending') {
+          pendingIds.add(toUserId);
+        } else if (status == 'accepted') {
+          acceptedIds.add(toUserId);
+        }
+      }
+
+      setState(() {
+        _pendingRequestUserIds = pendingIds;
+        _connectedUserIds.addAll(acceptedIds);
+      });
+
+      _applyFilters();
+    });
+
+    // Listen to accepted requests where user is receiver
+    _firestore
+        .collection('connection_requests')
+        .where('toUserId', isEqualTo: userId)
+        .where('status', isEqualTo: 'accepted')
+        .snapshots()
+        .listen((snapshot) {
+      final acceptedIds = <String>{};
+      for (var doc in snapshot.docs) {
+        final data = doc.data();
+        acceptedIds.add(data['fromUserId']);
+      }
+
+      setState(() {
+        _connectedUserIds.addAll(acceptedIds);
+      });
+
+      _applyFilters();
+    });
+  }
+
+  Future<void> _refreshData() async {
+    await _loadUsers();
   }
 
   Future<void> _loadUserProfile() async {
@@ -62,6 +139,8 @@ class _DiscoverUsersPageState extends State<DiscoverUsersPage> with TickerProvid
 
   Future<void> _loadUsers() async {
     try {
+      setState(() => _isLoading = true);
+
       final userId = _auth.currentUser?.uid;
       if (userId == null) return;
 
@@ -71,13 +150,18 @@ class _DiscoverUsersPageState extends State<DiscoverUsersPage> with TickerProvid
           .where('participants', arrayContains: userId)
           .get();
 
-      final requestsSnapshot = await _firestore
+      final sentRequestsSnapshot = await _firestore
           .collection('connection_requests')
-          .where('senderId', isEqualTo: userId)
-          .where('status', isEqualTo: 'pending')
+          .where('fromUserId', isEqualTo: userId)
+          .get();
+
+      final receivedRequestsSnapshot = await _firestore
+          .collection('connection_requests')
+          .where('toUserId', isEqualTo: userId)
           .get();
 
       Set<String> connectedUserIds = {};
+      Set<String> pendingRequestUserIds = {};
 
       // Add connected users
       for (var doc in connectionsSnapshot.docs) {
@@ -85,17 +169,39 @@ class _DiscoverUsersPageState extends State<DiscoverUsersPage> with TickerProvid
         connectedUserIds.addAll(participants.where((id) => id != userId));
       }
 
-      // Add users with pending requests
-      for (var doc in requestsSnapshot.docs) {
-        connectedUserIds.add(doc.data()['receiverId']);
+      // Add users with pending sent requests
+      for (var doc in sentRequestsSnapshot.docs) {
+        final data = doc.data();
+        if (data['status'] == 'pending') {
+          pendingRequestUserIds.add(data['toUserId']);
+        } else if (data['status'] == 'accepted') {
+          connectedUserIds.add(data['toUserId']);
+        }
       }
 
-      // Fetch all users except current user and already connected
-      final usersSnapshot = await _firestore.collection('users').get();
+      // Add users with accepted received requests
+      for (var doc in receivedRequestsSnapshot.docs) {
+        final data = doc.data();
+        if (data['status'] == 'accepted') {
+          connectedUserIds.add(data['fromUserId']);
+        }
+      }
+
+      // Update state variables
+      _connectedUserIds = connectedUserIds;
+      _pendingRequestUserIds = pendingRequestUserIds;
+
+      // Fetch all users except current user and already connected/requested
+      final usersSnapshot = await _firestore
+          .collection('users')
+          .where('profileComplete', isEqualTo: true)
+          .get();
 
       List<Map<String, dynamic>> users = [];
       for (var doc in usersSnapshot.docs) {
-        if (doc.id != userId && !connectedUserIds.contains(doc.id)) {
+        if (doc.id != userId &&
+            !connectedUserIds.contains(doc.id) &&
+            !pendingRequestUserIds.contains(doc.id)) {
           final userData = doc.data();
           users.add({
             'id': doc.id,
@@ -198,6 +304,11 @@ class _DiscoverUsersPageState extends State<DiscoverUsersPage> with TickerProvid
   void _applyFilters() {
     List<Map<String, dynamic>> filtered = List.from(_allUsers);
 
+    // Filter out connected and pending users
+    filtered = filtered.where((user) =>
+    !_connectedUserIds.contains(user['id']) &&
+        !_pendingRequestUserIds.contains(user['id'])).toList();
+
     // Search filter
     if (_searchController.text.isNotEmpty) {
       final searchTerm = _searchController.text.toLowerCase();
@@ -285,6 +396,10 @@ class _DiscoverUsersPageState extends State<DiscoverUsersPage> with TickerProvid
                   ),
               ],
             ),
+          ),
+          IconButton(
+            onPressed: _refreshData,
+            icon: const Icon(Icons.refresh, color: Colors.white),
           ),
         ],
         bottom: TabBar(
@@ -401,13 +516,18 @@ class _DiscoverUsersPageState extends State<DiscoverUsersPage> with TickerProvid
       );
     }
 
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: recommendedUsers.length,
-      itemBuilder: (context, index) {
-        final user = recommendedUsers[index];
-        return _buildUserCard(user, showMatchPercentage: true);
-      },
+    return RefreshIndicator(
+      onRefresh: _refreshData,
+      color: const Color(0xFF667eea),
+      backgroundColor: const Color(0xFF1D1E33),
+      child: ListView.builder(
+        padding: const EdgeInsets.all(16),
+        itemCount: recommendedUsers.length,
+        itemBuilder: (context, index) {
+          final user = recommendedUsers[index];
+          return _buildUserCard(user, showMatchPercentage: true);
+        },
+      ),
     );
   }
 
@@ -444,13 +564,18 @@ class _DiscoverUsersPageState extends State<DiscoverUsersPage> with TickerProvid
       );
     }
 
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: _filteredUsers.length,
-      itemBuilder: (context, index) {
-        final user = _filteredUsers[index];
-        return _buildUserCard(user, showMatchPercentage: false);
-      },
+    return RefreshIndicator(
+      onRefresh: _refreshData,
+      color: const Color(0xFF667eea),
+      backgroundColor: const Color(0xFF1D1E33),
+      child: ListView.builder(
+        padding: const EdgeInsets.all(16),
+        itemCount: _filteredUsers.length,
+        itemBuilder: (context, index) {
+          final user = _filteredUsers[index];
+          return _buildUserCard(user, showMatchPercentage: false);
+        },
+      ),
     );
   }
 
@@ -972,18 +1097,18 @@ class _DiscoverUsersPageState extends State<DiscoverUsersPage> with TickerProvid
 
       // Send connection request
       await _firestore.collection('connection_requests').add({
-        'senderId': userId,
-        'receiverId': user['id'],
+        'fromUserId': userId,
+        'toUserId': user['id'],
         'message': message,
         'status': 'pending',
-        'timestamp': FieldValue.serverTimestamp(),
+        'createdAt': FieldValue.serverTimestamp(),
       });
 
-      // Remove from list
+      // Add to pending set and refresh
       setState(() {
-        _allUsers.removeWhere((u) => u['id'] == user['id']);
-        _filteredUsers.removeWhere((u) => u['id'] == user['id']);
+        _pendingRequestUserIds.add(user['id']);
       });
+      _applyFilters();
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -1060,11 +1185,340 @@ class _DiscoverUsersPageState extends State<DiscoverUsersPage> with TickerProvid
   }
 
   void _viewUserProfile(Map<String, dynamic> user) {
-    // TODO: Navigate to detailed user profile page
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Viewing ${user['name']}\'s profile...'),
-        backgroundColor: const Color(0xFF667eea),
+    // Navigate to detailed user profile page
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => UserProfilePage(userData: user),
+      ),
+    );
+  }
+}
+
+// Create a separate UserProfilePage widget
+class UserProfilePage extends StatelessWidget {
+  final Map<String, dynamic> userData;
+
+  const UserProfilePage({Key? key, required this.userData}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0A0E21),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF1D1E33),
+        elevation: 0,
+        leading: IconButton(
+          onPressed: () => Navigator.pop(context),
+          icon: const Icon(Icons.arrow_back, color: Colors.white),
+        ),
+        title: Text(
+          userData['name'] ?? 'User Profile',
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 18,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Profile Header
+            Center(
+              child: Column(
+                children: [
+                  Container(
+                    width: 100,
+                    height: 100,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: userData['isOnline'] ? Colors.green : Colors.grey,
+                        width: 3,
+                      ),
+                    ),
+                    child: ClipOval(
+                      child: userData['profileImage'] != null
+                          ? Image.file(
+                        File(userData['profileImage']),
+                        fit: BoxFit.cover,
+                      )
+                          : Container(
+                        color: const Color(0xFF1D1E33),
+                        child: const Icon(
+                          Icons.person,
+                          color: Colors.grey,
+                          size: 50,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    userData['name'] ?? 'Unknown User',
+                    style: const TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        Icons.circle,
+                        color: userData['isOnline'] ? Colors.green : Colors.grey,
+                        size: 12,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        userData['isOnline'] ? 'Online' : 'Offline',
+                        style: TextStyle(
+                          color: userData['isOnline'] ? Colors.green : Colors.grey,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 24),
+
+            // Bio Section
+            if (userData['bio'] != null && userData['bio'].toString().isNotEmpty) ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1D1E33),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFF2A2D3A)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'About',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      userData['bio'],
+                      style: const TextStyle(
+                        fontSize: 16,
+                        color: Colors.grey,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
+
+            // Details Section
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1D1E33),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFF2A2D3A)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Details',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  if (userData['location'] != null && userData['location'].toString().isNotEmpty)
+                    _buildDetailRow(Icons.location_on, 'Location', userData['location']),
+                  if (userData['experienceLevel'] != null)
+                    _buildDetailRow(Icons.trending_up, 'Experience', userData['experienceLevel']),
+                  if (userData['availableForMentoring'] == true)
+                    _buildDetailRow(Icons.school, 'Mentoring', 'Available for mentoring'),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Skills Offered
+            if (userData['skillsOffered'] != null && (userData['skillsOffered'] as List).isNotEmpty) ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1D1E33),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFF2A2D3A)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.lightbulb, color: Colors.green, size: 20),
+                        SizedBox(width: 8),
+                        Text(
+                          'Skills Offered',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: (userData['skillsOffered'] as List).map<Widget>((skill) {
+                        return Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: Colors.green.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: Colors.green.withOpacity(0.3)),
+                          ),
+                          child: Text(
+                            skill['name'] ?? skill.toString(),
+                            style: const TextStyle(
+                              color: Colors.green,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
+
+            // Skills Wanted
+            if (userData['skillsWanted'] != null && (userData['skillsWanted'] as List).isNotEmpty) ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1D1E33),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFF2A2D3A)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.school, color: Colors.orange, size: 20),
+                        SizedBox(width: 8),
+                        Text(
+                          'Skills Learning',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: (userData['skillsWanted'] as List).map<Widget>((skill) {
+                        return Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: Colors.orange.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: Colors.orange.withOpacity(0.3)),
+                          ),
+                          child: Text(
+                            skill['name'] ?? skill.toString(),
+                            style: const TextStyle(
+                              color: Colors.orange,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 24),
+            ],
+
+            // Action Button
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: () {
+                  Navigator.pop(context);
+                  // You could add a callback here to send connection request
+                },
+                icon: const Icon(Icons.connect_without_contact),
+                label: const Text('Send Connection Request'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF667eea),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDetailRow(IconData icon, String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        children: [
+          Icon(icon, color: Colors.grey, size: 18),
+          const SizedBox(width: 12),
+          Text(
+            '$label: ',
+            style: const TextStyle(
+              color: Colors.grey,
+              fontSize: 16,
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
