@@ -32,15 +32,15 @@ class _ProfileSetupPageState extends State<ProfileSetupPage> {
   ];
 
   final Map<String, List<String>> _skillsByCategory = {
-    'Programming': ['Flutter', 'React', 'Python', 'Java', 'JavaScript', 'Swift'],
-    'Design': ['UI/UX', 'Graphic Design', 'Web Design', 'Logo Design'],
-    'Marketing': ['Digital Marketing', 'SEO', 'Content Marketing', 'Social Media'],
-    'Business': ['Management', 'Finance', 'Sales', 'Entrepreneurship'],
-    'Languages': ['English', 'Spanish', 'French', 'German', 'Hindi', 'Mandarin'],
-    'Music': ['Guitar', 'Piano', 'Singing', 'Music Production'],
-    'Sports': ['Football', 'Basketball', 'Tennis', 'Swimming', 'Yoga'],
-    'Cooking': ['Italian', 'Indian', 'Chinese', 'Baking', 'Healthy Cooking'],
-    'Other': ['Photography', 'Writing', 'Public Speaking', 'Teaching']
+    'Programming': ['Flutter', 'React', 'Python', 'Java', 'JavaScript', 'Swift', 'Node.js', 'PHP', 'C++', 'Go', 'Typescript', 'Dart','Kotlin','Next.js','Express.js', 'Rust','R','Scala','Solidity','FastAPI', 'REST APIs', 'Docker', 'npm', 'TensorFlow', 'scikit-learn', 'OpenCV', 'Pandas','NumPy'],
+    'Design': ['UI/UX', 'Graphic Design', 'Web Design', 'Logo Design', 'Figma', 'Adobe Photoshop', 'Illustrator'],
+    'Marketing': ['Digital Marketing', 'SEO', 'Content Marketing', 'Social Media', 'Email Marketing', 'PPC'],
+    'Business': ['Management', 'Finance', 'Sales', 'Entrepreneurship', 'Strategy', 'Operations', 'Analytics'],
+    'Languages': ['English', 'Spanish', 'French', 'German', 'Hindi', 'Mandarin', 'Arabic', 'Japanese'],
+    'Music': ['Guitar', 'Piano', 'Singing', 'Music Production', 'Drums', 'Violin', 'DJing'],
+    'Sports': ['Football', 'Basketball', 'Tennis', 'Swimming', 'Yoga', 'Running', 'Gym Training'],
+    'Cooking': ['Italian', 'Indian', 'Chinese', 'Baking', 'Healthy Cooking', 'Vegan', 'BBQ'],
+    'Other': ['Photography', 'Writing', 'Public Speaking', 'Teaching', 'Video Editing', 'Animation']
   };
 
   @override
