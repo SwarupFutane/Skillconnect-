@@ -39,7 +39,7 @@ class _EditProfilePageState extends State<EditProfilePage> with TickerProviderSt
   ];
 
   final Map<String, List<String>> _skillsByCategory = {
-    'Programming': ['Flutter', 'React', 'Python', 'Java', 'JavaScript', 'Swift', 'Node.js', 'PHP', 'C++', 'Go'],
+    'Programming': ['Flutter', 'React', 'Python', 'Java', 'JavaScript', 'Swift', 'Node.js', 'PHP', 'C++', 'Go', 'Typescript', 'Dart','Kotlin','Next.js','Express.js', 'Rust','R','Scala','Solidity','FastAPI', 'REST APIs', 'Docker', 'npm', 'TensorFlow', 'scikit-learn', 'OpenCV', 'Pandas','NumPy'],
     'Design': ['UI/UX', 'Graphic Design', 'Web Design', 'Logo Design', 'Figma', 'Adobe Photoshop', 'Illustrator'],
     'Marketing': ['Digital Marketing', 'SEO', 'Content Marketing', 'Social Media', 'Email Marketing', 'PPC'],
     'Business': ['Management', 'Finance', 'Sales', 'Entrepreneurship', 'Strategy', 'Operations', 'Analytics'],
